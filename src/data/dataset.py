@@ -146,8 +146,10 @@ class PcapLocationDataset(Dataset):
         y = np.zeros((n,), dtype=np.float32)
         if len(pos_idxs) == 0:
             return y
-        m = pos_idxs[pos_idxs < n]
-        y[m] = 1.0
+        # Keep only indices within [0, n-1]
+        m = pos_idxs[(pos_idxs >= 0) & (pos_idxs < n)]
+        if m.size > 0:
+            y[m] = 1.0
         return y
 
     def __getitem__(self, i: int) -> Dict[str, torch.Tensor]:

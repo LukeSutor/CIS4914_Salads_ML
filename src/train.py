@@ -64,6 +64,9 @@ def build_model(cfg: Dict, in_features: int) -> MILTCN:
         mil_hidden=int(mcfg.get("mil_hidden", 64)),
         use_noisy_or=bool(mcfg.get("use_noisy_or", True)),
     )
+    # Print model size
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model has {n_params} trainable parameters")
     return model
 
 
