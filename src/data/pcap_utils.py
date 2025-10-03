@@ -27,9 +27,7 @@ def _is_private_ip(ip: str) -> bool:
 class PacketFeatures:
     """Holds per-packet numeric features and metadata."""
 
-    ts: float
     length: int
-    l3_ipv6: int
     l4_tcp: int
     l4_udp: int
     l4_icmp: int
@@ -40,16 +38,12 @@ class PacketFeatures:
     tcp_ack: int
     tcp_fin: int
     tcp_rst: int
-    common_https: int  # heuristic: 443/https family
-    common_dns: int  # udp/53
     flow_hash: int  # 32-bit hash of 5-tuple
 
     @staticmethod
     def feature_names() -> List[str]:
         return [
-            "ts",
             "length",
-            "l3_ipv6",
             "l4_tcp",
             "l4_udp",
             "l4_icmp",
@@ -60,8 +54,6 @@ class PacketFeatures:
             "tcp_ack",
             "tcp_fin",
             "tcp_rst",
-            "common_https",
-            "common_dns",
             "flow_hash",
         ]
 
@@ -115,16 +107,13 @@ def _parse_packet(ts: float, buf: bytes) -> Tuple[PacketFeatures, Dict[str, str]
             src_ip = ipaddress.ip_address(ip.src).compressed
             dst_ip = ipaddress.ip_address(ip.dst).compressed
         elif isinstance(eth.data, dpkt.ip6.IP6):
-            l3_ipv6 = 1
             ip = eth.data
             src_ip = ipaddress.ip_address(ip.src).compressed
             dst_ip = ipaddress.ip_address(ip.dst).compressed
         else:
             # Non-IP traffic
             pf = PacketFeatures(
-                ts=ts,
                 length=length,
-                l3_ipv6=l3_ipv6,
                 l4_tcp=0,
                 l4_udp=0,
                 l4_icmp=0,
@@ -135,8 +124,6 @@ def _parse_packet(ts: float, buf: bytes) -> Tuple[PacketFeatures, Dict[str, str]
                 tcp_ack=0,
                 tcp_fin=0,
                 tcp_rst=0,
-                common_https=0,
-                common_dns=0,
                 flow_hash=0,
             )
             return pf, {"src_ip": "", "dst_ip": ""}
@@ -161,17 +148,11 @@ def _parse_packet(ts: float, buf: bytes) -> Tuple[PacketFeatures, Dict[str, str]
         else:
             pass
 
-        # Heuristics
-        common_https = int(dst_port in {443, 853, 8443} or src_port in {443, 853, 8443})
-        common_dns = int((l4_udp == 1) and (dst_port == 53 or src_port == 53))
-
         flow_key = f"{src_ip}:{src_port}->{dst_ip}:{dst_port}:{int(l4_tcp)*6+int(l4_udp)*17}"
         flow_hash = _safe_hash32(flow_key)
 
         pf = PacketFeatures(
-            ts=ts,
             length=length,
-            l3_ipv6=l3_ipv6,
             l4_tcp=l4_tcp,
             l4_udp=l4_udp,
             l4_icmp=l4_icmp,
@@ -182,17 +163,13 @@ def _parse_packet(ts: float, buf: bytes) -> Tuple[PacketFeatures, Dict[str, str]
             tcp_ack=tcp_ack,
             tcp_fin=tcp_fin,
             tcp_rst=tcp_rst,
-            common_https=common_https,
-            common_dns=common_dns,
             flow_hash=flow_hash,
         )
         return pf, {"src_ip": src_ip or "", "dst_ip": dst_ip or ""}
     except Exception:
         # Corrupt/unsupported frame: return minimal features
         pf = PacketFeatures(
-            ts=ts,
             length=length,
-            l3_ipv6=0,
             l4_tcp=0,
             l4_udp=0,
             l4_icmp=0,
@@ -203,8 +180,6 @@ def _parse_packet(ts: float, buf: bytes) -> Tuple[PacketFeatures, Dict[str, str]
             tcp_ack=0,
             tcp_fin=0,
             tcp_rst=0,
-            common_https=0,
-            common_dns=0,
             flow_hash=0,
         )
         return pf, {"src_ip": "", "dst_ip": ""}
@@ -274,10 +249,12 @@ def parse_pcap_to_features(
     # Parse raw packets
     feats: List[PacketFeatures] = []
     metas: List[Dict[str, str]] = []
+    timestamps: List[float] = []
     for ts, buf in _read_pcap(path):
         pf, meta = _parse_packet(ts, buf)
         feats.append(pf)
         metas.append(meta)
+        timestamps.append(ts)
 
     # Direction inference
     dev_ip = device_ip or (guess_device and guess_device_ip(metas)) or None
@@ -287,14 +264,12 @@ def parse_pcap_to_features(
     # Convert to numpy
     rows = []
     prev_ts = None
-    for pf in feats:
-        iadelta = 0.0 if prev_ts is None else max(0.0, pf.ts - prev_ts)
-        prev_ts = pf.ts
+    for pf, ts in zip(feats, timestamps):
+        iadelta = 0.0 if prev_ts is None else max(0.0, ts - prev_ts)
+        prev_ts = ts
         rows.append(
             [
-                pf.ts,
                 float(pf.length),
-                float(pf.l3_ipv6),
                 float(pf.l4_tcp),
                 float(pf.l4_udp),
                 float(pf.l4_icmp),
@@ -305,8 +280,6 @@ def parse_pcap_to_features(
                 float(pf.tcp_ack),
                 float(pf.tcp_fin),
                 float(pf.tcp_rst),
-                float(pf.common_https),
-                float(pf.common_dns),
                 float(pf.flow_hash),
                 float(iadelta),
             ]
