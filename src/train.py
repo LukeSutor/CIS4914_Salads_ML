@@ -5,11 +5,14 @@ import math
 import os
 from pathlib import Path
 import sys
+from datetime import datetime
 from typing import Dict, Tuple
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from tqdm import tqdm
+import trackio
 
 # Ensure package imports work when running as a script from any CWD
 _THIS = Path(__file__).resolve()
@@ -70,7 +73,7 @@ def build_model(cfg: Dict, in_features: int) -> MILTCN:
     return model
 
 
-def train_one_epoch(model: nn.Module, loader: DataLoader, device: torch.device, cfg: Dict, scaler: torch.cuda.amp.GradScaler, optimizer: torch.optim.Optimizer) -> Dict[str, float]:
+def train_one_epoch(model: nn.Module, loader: DataLoader, device: torch.device, cfg: Dict, scaler: torch.cuda.amp.GradScaler, optimizer: torch.optim.Optimizer, epoch: int) -> Dict[str, float]:
     model.train()
     losses = []
     m = []
@@ -79,7 +82,8 @@ def train_one_epoch(model: nn.Module, loader: DataLoader, device: torch.device, 
     crit_inst = nn.BCEWithLogitsLoss(reduction="none") if lambda_inst > 0 else None
     max_grad_norm = float(cfg["train"].get("max_grad_norm", 1.0))
 
-    for batch in loader:
+    pbar = tqdm(loader, desc=f"Epoch {epoch} [Train]", leave=False)
+    for batch in pbar:
         x = batch["x"].to(device)
         mask = batch["mask"].to(device)
         y_bag = batch["y_bag"].to(device)
@@ -101,6 +105,9 @@ def train_one_epoch(model: nn.Module, loader: DataLoader, device: torch.device, 
         scaler.update()
         losses.append(loss.item())
         m.append(binary_metrics(bag_logits.detach(), y_bag.detach()))
+        
+        # Update progress bar with current metrics
+        pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
     # Aggregate metrics
     if not m:
@@ -111,12 +118,13 @@ def train_one_epoch(model: nn.Module, loader: DataLoader, device: torch.device, 
 
 
 @torch.no_grad()
-def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> Dict[str, float]:
+def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, epoch: int) -> Dict[str, float]:
     model.eval()
     losses = []
     m = []
     crit_bag = nn.BCEWithLogitsLoss()
-    for batch in loader:
+    pbar = tqdm(loader, desc=f"Epoch {epoch} [Val]", leave=False)
+    for batch in pbar:
         x = batch["x"].to(device)
         mask = batch["mask"].to(device)
         y_bag = batch["y_bag"].to(device)
@@ -124,6 +132,10 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> Dict
         loss = crit_bag(bag_logits, y_bag)
         losses.append(loss.item())
         m.append(binary_metrics(bag_logits, y_bag))
+        
+        # Update progress bar with current metrics
+        pbar.set_postfix({"val_loss": f"{loss.item():.4f}"})
+    
     if not m:
         return {"val_loss": float("nan"), "precision": 0.0, "recall": 0.0, "f1": 0.0, "accuracy": 0.0}
     avg = {k: float(sum(d[k] for d in m) / len(m)) for k in m[0]}
@@ -133,12 +145,28 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> Dict
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    date = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config")
+    parser.add_argument("--run-name", type=str, default=f"training_{date}", help="Run name for tracking")
+    parser.add_argument("--project", type=str, default="location-sharing-detection", help="Project name for trackio")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     seed_everything(int(cfg.get("seed", 42)))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Initialize trackio for experiment tracking
+    run_name = args.run_name or cfg.get("run_name", "mil_tcn_run")
+    trackio.init(
+        project=args.project,
+        name=run_name,
+        config={
+            "seed": cfg.get("seed", 42),
+            "model": cfg.get("model", {}),
+            "train": cfg.get("train", {}),
+            "data": cfg.get("data", {}),
+        }
+    )
 
     # Dataloaders
     train_loader, val_loader = build_dataloaders(cfg)
@@ -156,9 +184,30 @@ def main() -> None:
 
     best_f1 = -1.0
     epochs = int(opt_cfg.get("epochs", 10))
+    
+    print(f"\nStarting training for {epochs} epochs on {device}")
+    print(f"Run name: {run_name}")
+    print("-" * 60)
+    
     for epoch in range(1, epochs + 1):
-        tr = train_one_epoch(model, train_loader, device, cfg, scaler, optimizer)
-        va = evaluate(model, val_loader, device)
+        tr = train_one_epoch(model, train_loader, device, cfg, scaler, optimizer, epoch)
+        va = evaluate(model, val_loader, device, epoch)
+        
+        # Log metrics to trackio
+        trackio.log({
+            "epoch": epoch,
+            "train_loss": tr['loss'],
+            "train_accuracy": tr['accuracy'],
+            "train_precision": tr['precision'],
+            "train_recall": tr['recall'],
+            "train_f1": tr['f1'],
+            "val_loss": va['val_loss'],
+            "val_accuracy": va['accuracy'],
+            "val_precision": va['precision'],
+            "val_recall": va['recall'],
+            "val_f1": va['f1'],
+        })
+        
         print(f"epoch {epoch:03d} | loss {tr['loss']:.4f} | acc {tr['accuracy']:.3f} | f1 {tr['f1']:.3f} || val_loss {va['val_loss']:.4f} | val_acc {va['accuracy']:.3f} | val_f1 {va['f1']:.3f}")
 
         # Save latest
@@ -180,6 +229,13 @@ def main() -> None:
                 "epoch": epoch,
                 "val": va,
             }, best_path)
+            print(f"  → New best F1: {best_f1:.3f} (saved to {best_path})")
+    
+    print("-" * 60)
+    print(f"Training complete! Best val F1: {best_f1:.3f}")
+    
+    # Finish trackio logging
+    trackio.finish()
 
 
 if __name__ == "__main__":

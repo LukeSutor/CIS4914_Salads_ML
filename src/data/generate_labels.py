@@ -35,30 +35,8 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
-import dpkt  # type: ignore
-
-# Try to import tqdm, fall back to a dummy if not available
-try:
-    from tqdm import tqdm
-except ImportError:
-    # Dummy tqdm if not installed
-    class tqdm:
-        def __init__(self, iterable=None, total=None, desc=None, unit=None, leave=True):
-            self.iterable = iterable
-            self.total = total
-            self.desc = desc
-            
-        def __enter__(self):
-            return self
-            
-        def __exit__(self, *args):
-            pass
-            
-        def __iter__(self):
-            return iter(self.iterable) if self.iterable else iter([])
-            
-        def update(self, n=1):
-            pass
+import dpkt
+from tqdm import tqdm
 
 # Add the src directory to the path to enable absolute imports
 script_dir = Path(__file__).parent
@@ -80,6 +58,107 @@ def load_location_hosts(hosts_file: Path) -> Set[str]:
                 if line and not line.startswith('#'):
                     hosts.add(line.lower())
     return hosts
+
+
+def load_ip_cache(cache_file: Path) -> Dict[str, List[str]]:
+    """Load cached hostname-to-IPs mapping from file.
+    
+    Returns:
+        Dictionary mapping hostnames to lists of IP addresses
+    """
+    if not cache_file.exists():
+        return {}
+    
+    try:
+        with cache_file.open('r', encoding='utf-8') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"Warning: Could not load IP cache: {e}")
+        return {}
+
+
+def save_ip_cache(cache_file: Path, ip_cache: Dict[str, List[str]]) -> None:
+    """Save hostname-to-IPs mapping to cache file."""
+    try:
+        with cache_file.open('w', encoding='utf-8') as f:
+            json.dump(ip_cache, f, indent=2)
+        print(f"Saved IP cache to {cache_file.name}")
+    except IOError as e:
+        print(f"Warning: Could not save IP cache: {e}")
+
+
+def build_ip_lookup_from_hosts(
+    location_hosts: Set[str],
+    cache_file: Path,
+    force_refresh: bool = False
+) -> Dict[str, str]:
+    """Build IP-to-hostname lookup table, using cache when available.
+    
+    Args:
+        location_hosts: Set of hostnames to resolve
+        cache_file: Path to cache file for storing resolutions
+        force_refresh: If True, ignore cache and re-resolve all hosts
+        
+    Returns:
+        Dictionary mapping IP addresses to hostnames (for fast lookup)
+    """
+    # Load existing cache
+    hostname_to_ips = load_ip_cache(cache_file) if not force_refresh else {}
+    
+    # Determine which hosts need resolution
+    cached_hosts = set(hostname_to_ips.keys())
+    hosts_to_resolve = location_hosts - cached_hosts
+    
+    if hosts_to_resolve:
+        print(f"\nResolving {len(hosts_to_resolve)} new/uncached hosts...")
+        print(f"(Using {len(cached_hosts)} cached hosts)")
+        
+        resolved_count = 0
+        failed_count = 0
+        
+        with tqdm(list(hosts_to_resolve), desc="  Resolving hosts", unit="host") as pbar:
+            for hostname in pbar:
+                try:
+                    # Skip entries that are already IP addresses
+                    if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', hostname):
+                        hostname_to_ips[hostname] = [hostname]
+                        resolved_count += 1
+                        pbar.set_postfix(resolved=resolved_count, failed=failed_count)
+                        continue
+                    
+                    # Resolve hostname to IP(s)
+                    socket.setdefaulttimeout(2.0)
+                    ips = socket.gethostbyname_ex(hostname)[2]
+                    hostname_to_ips[hostname] = ips
+                    resolved_count += 1
+                    pbar.set_postfix(resolved=resolved_count, failed=failed_count)
+                    
+                except (socket.herror, socket.gaierror, OSError, socket.timeout):
+                    # Store empty list for hosts that don't resolve
+                    hostname_to_ips[hostname] = []
+                    failed_count += 1
+                    pbar.set_postfix(resolved=resolved_count, failed=failed_count)
+                finally:
+                    socket.setdefaulttimeout(None)
+        
+        print(f"  Successfully resolved: {resolved_count}")
+        print(f"  Failed to resolve: {failed_count}")
+        
+        # Save updated cache
+        save_ip_cache(cache_file, hostname_to_ips)
+    else:
+        print(f"\nUsing cached IP resolutions for all {len(cached_hosts)} hosts")
+    
+    # Build reverse lookup table: IP -> hostname
+    ip_to_hostname = {}
+    total_ips = 0
+    for hostname, ips in hostname_to_ips.items():
+        for ip in ips:
+            ip_to_hostname[ip] = hostname
+            total_ips += 1
+    
+    print(f"Built lookup table with {total_ips} IP addresses from {len(hostname_to_ips)} hosts\n")
+    return ip_to_hostname
 
 
 def is_find_my_friends_host(hostname: str) -> bool:
@@ -114,7 +193,8 @@ def resolve_ip_to_hostname(ip: str) -> str:
 
 def analyze_pcap_for_location_requests(
     pcap_path: Path, 
-    location_hosts: Set[str]
+    location_hosts: Set[str],
+    ip_lookup: Dict[str, str]
 ) -> List[int]:
     """
     Analyze PCAP file and return 1-indexed packet numbers containing location requests.
@@ -122,6 +202,7 @@ def analyze_pcap_for_location_requests(
     Args:
         pcap_path: Path to PCAP file
         location_hosts: Set of known location sharing hostnames
+        ip_lookup: Pre-resolved IP to hostname mapping
         
     Returns:
         List of 1-indexed packet numbers with location sharing activity
@@ -163,13 +244,21 @@ def analyze_pcap_for_location_requests(
                     # Check if this packet contains location sharing traffic
                     is_location_packet = False
                     
-                    # Method 1: Check direct IP matches against location hosts
+                    # Method 1: Fast IP lookup in pre-resolved table
                     for check_ip in [src_ip, dst_ip]:
-                        if check_ip in location_hosts:
+                        if check_ip in ip_lookup:
+                            import pdb; pdb.set_trace()
                             is_location_packet = True
                             break
                     
-                    # Method 2: Extract hostname from packet content and check patterns
+                    # Method 2: Check direct IP matches against location hosts
+                    if not is_location_packet:
+                        for check_ip in [src_ip, dst_ip]:
+                            if check_ip in location_hosts:
+                                is_location_packet = True
+                                break
+                    
+                    # Method 3: Extract hostname from packet content and check patterns
                     if not is_location_packet and hasattr(ip, 'data'):
                         hostnames = extract_hostnames_from_packet(ip)
                         for hostname in hostnames:
@@ -177,7 +266,7 @@ def analyze_pcap_for_location_requests(
                                 is_location_packet = True
                                 break
                     
-                    # Method 3: Try reverse DNS lookup on destination IPs (expensive, only if needed)
+                    # Method 4: Try reverse DNS lookup on destination IPs (expensive, last resort)
                     if not is_location_packet:
                         for check_ip in [dst_ip]:  # Only check destination to reduce lookups
                             hostname = resolve_ip_to_hostname(check_ip)
@@ -297,7 +386,8 @@ def extract_tls_sni(packet_data: bytes) -> List[str]:
 
 def process_folder(
     folder_path: Path, 
-    location_hosts: Set[str], 
+    location_hosts: Set[str],
+    ip_lookup: Dict[str, str],
     force_overwrite: bool = False
 ) -> Tuple[int, int]:
     """Process all PCAP files in a folder and generate labels.
@@ -335,7 +425,7 @@ def process_folder(
             continue
         
         # Analyze PCAP file
-        location_packets = analyze_pcap_for_location_requests(pcap_file, location_hosts)
+        location_packets = analyze_pcap_for_location_requests(pcap_file, location_hosts, ip_lookup)
         
         # Write labels to JSON file
         try:
@@ -366,6 +456,8 @@ def main():
                        help="Overwrite existing label files")
     parser.add_argument("--folder", type=str, 
                        help="Process only a specific folder (overrides config)")
+    parser.add_argument("--refresh-cache", action="store_true",
+                       help="Force refresh the IP resolution cache (re-resolve all hosts)")
     
     args = parser.parse_args()
     
@@ -382,6 +474,10 @@ def main():
     hosts_file = script_dir / "locationsharing_hosts.txt"
     location_hosts = load_location_hosts(hosts_file)
     print(f"Loaded {len(location_hosts)} known location sharing hosts")
+    
+    # Build IP lookup table from cached resolutions
+    cache_file = script_dir / "locationsharing_ips_cache.json"
+    ip_lookup = build_ip_lookup_from_hosts(location_hosts, cache_file, force_refresh=args.refresh_cache)
     
     # Get data folders
     if args.folder:
@@ -403,7 +499,7 @@ def main():
     
     for folder_str in all_folders:
         folder_path = Path(folder_str)
-        processed, labeled = process_folder(folder_path, location_hosts, force_overwrite=args.force)
+        processed, labeled = process_folder(folder_path, location_hosts, ip_lookup, force_overwrite=args.force)
         total_processed += processed
         total_labeled += labeled
     

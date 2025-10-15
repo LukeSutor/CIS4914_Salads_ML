@@ -164,8 +164,6 @@ class PcapLocationDataset(Dataset):
         y_dense = self._labels_dense(pos_idxs - s, n)
         y_bag = float(y_dense.max() if n > 0 else 0.0)
 
-        import pdb; pdb.set_trace()
-
         # Normalize numeric features
         x = (x - self.feat_mean) / self.feat_std
 
