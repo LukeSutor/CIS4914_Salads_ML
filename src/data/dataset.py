@@ -113,15 +113,17 @@ class PcapLocationDataset(Dataset):
                         e = s + L
                     self.index.append((fi, s, e))
             else:  # time-based
-                ts = feats[:, 0]
-                tmin, tmax = float(ts[0]), float(ts[-1])
+                # Since we removed timestamps from features, use iadelta (last column) to compute cumulative time
+                iadelta = feats[:, -1]  # inter-arrival delta is the last column
+                cumtime = np.cumsum(iadelta)  # approximate cumulative time
+                tmin, tmax = float(cumtime[0]), float(cumtime[-1])
                 total = max(1e-6, tmax - tmin)
                 for _ in range(self.windows_per_file):
                     dur = rng.uniform(self.time_range_s[0], self.time_range_s[1])
                     t0 = rng.uniform(tmin, max(tmin, tmax - dur))
                     t1 = t0 + dur
-                    s = int(np.searchsorted(ts, t0, side="left"))
-                    e = int(np.searchsorted(ts, t1, side="right"))
+                    s = int(np.searchsorted(cumtime, t0, side="left"))
+                    e = int(np.searchsorted(cumtime, t1, side="right"))
                     if e - s < self.min_len:
                         # Expand minimally
                         need = self.min_len - (e - s)
