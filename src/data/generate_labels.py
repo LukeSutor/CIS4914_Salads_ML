@@ -212,10 +212,29 @@ def analyze_pcap_for_location_requests(
     
     print(f"  Analyzing {pcap_path.name}...")
     
+    # Detect link layer type from first packet
+    link_type = None
+    
     try:
         # Read all packets into memory first to enable progress tracking
         packets = list(_read_pcap(pcap_path))
         total_packets = len(packets)
+        
+        # Detect link layer type from the PCAP file
+        with pcap_path.open("rb") as f:
+            try:
+                pcap_reader = dpkt.pcap.Reader(f)
+                link_type = pcap_reader.datalink()
+            except (ValueError, OSError):
+                # Try pcapng
+                f.seek(0)
+                try:
+                    pcapng_reader = dpkt.pcapng.Reader(f)
+                    link_type = getattr(pcapng_reader, 'datalink', lambda: 1)()
+                except:
+                    link_type = 1  # Default to Ethernet
+        
+        print(f"    Detected link layer type: {link_type}")
         
         # Process packets with progress bar
         with tqdm(packets, desc=f"    Processing {pcap_path.name}", 
@@ -224,22 +243,82 @@ def analyze_pcap_for_location_requests(
                 packet_num += 1
                 
                 try:
-                    # Parse Ethernet frame
-                    eth = dpkt.ethernet.Ethernet(buf)
+                    # Parse packet based on link layer type
+                    ip = None
                     
-                    # Check if it's IP traffic
-                    if not isinstance(eth.data, (dpkt.ip.IP, dpkt.ip6.IP6)):
+                    # DLT_EN10MB (1) = Ethernet
+                    # DLT_RAW (101, 12, 14) = Raw IP (no link layer)
+                    # DLT_LINUX_SLL (113) = Linux cooked capture
+                    # DLT_IPV4 (228) = Raw IPv4
+                    # DLT_IPV6 (229) = Raw IPv6
+                    
+                    if link_type == 1:  # Ethernet
+                        eth = dpkt.ethernet.Ethernet(buf)
+                        if isinstance(eth.data, (dpkt.ip.IP, dpkt.ip6.IP6)):
+                            ip = eth.data
+                    elif link_type in (12, 14, 101):  # Raw IP
+                        # Try IPv4 first
+                        try:
+                            ip = dpkt.ip.IP(buf)
+                        except:
+                            # Try IPv6
+                            try:
+                                ip = dpkt.ip6.IP6(buf)
+                            except:
+                                continue
+                    elif link_type == 113:  # Linux cooked capture
+                        # Linux cooked capture has 16 byte header
+                        if len(buf) < 16:
+                            continue
+                        # Protocol type is at offset 14-15
+                        proto_type = int.from_bytes(buf[14:16], 'big')
+                        payload = buf[16:]
+                        if proto_type == 0x0800:  # IPv4
+                            try:
+                                ip = dpkt.ip.IP(payload)
+                            except:
+                                continue
+                        elif proto_type == 0x86DD:  # IPv6
+                            try:
+                                ip = dpkt.ip6.IP6(payload)
+                            except:
+                                continue
+                    elif link_type == 228:  # Raw IPv4
+                        try:
+                            ip = dpkt.ip.IP(buf)
+                        except:
+                            continue
+                    elif link_type == 229:  # Raw IPv6
+                        try:
+                            ip = dpkt.ip6.IP6(buf)
+                        except:
+                            continue
+                    else:
+                        # Try Ethernet as default fallback
+                        try:
+                            eth = dpkt.ethernet.Ethernet(buf)
+                            if isinstance(eth.data, (dpkt.ip.IP, dpkt.ip6.IP6)):
+                                ip = eth.data
+                        except:
+                            continue
+                    
+                    # Skip if we couldn't parse an IP packet
+                    if ip is None or not isinstance(ip, (dpkt.ip.IP, dpkt.ip6.IP6)):
                         continue
-                        
-                    ip = eth.data
                     
                     # Get source and destination IPs
-                    if isinstance(ip, dpkt.ip.IP):
-                        src_ip = socket.inet_ntoa(ip.src)
-                        dst_ip = socket.inet_ntoa(ip.dst)
-                    else:  # IPv6
-                        src_ip = socket.inet_ntop(socket.AF_INET6, ip.src)
-                        dst_ip = socket.inet_ntop(socket.AF_INET6, ip.dst)
+                    try:
+                        if isinstance(ip, dpkt.ip.IP):
+                            src_ip = socket.inet_ntoa(ip.src)
+                            dst_ip = socket.inet_ntoa(ip.dst)
+                        else:  # IPv6
+                            src_ip = socket.inet_ntop(socket.AF_INET6, ip.src)
+                            dst_ip = socket.inet_ntop(socket.AF_INET6, ip.dst)
+                    except (OSError, ValueError) as e:
+                        # Skip packets with malformed IP addresses
+                        continue
+                
+                    import pdb; pdb.set_trace()
                     
                     # Check if this packet contains location sharing traffic
                     is_location_packet = False
@@ -247,7 +326,6 @@ def analyze_pcap_for_location_requests(
                     # Method 1: Fast IP lookup in pre-resolved table
                     for check_ip in [src_ip, dst_ip]:
                         if check_ip in ip_lookup:
-                            import pdb; pdb.set_trace()
                             is_location_packet = True
                             break
                     

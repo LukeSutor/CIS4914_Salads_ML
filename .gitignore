@@ -5,3 +5,7 @@ __pycache__/
 .venv/
 *.npz
 runs/
+
+# Large pcap files
+active_queries.pcapng
+once_per_min.pcapng
