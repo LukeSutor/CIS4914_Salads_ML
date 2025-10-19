@@ -119,18 +119,42 @@ def build_ip_lookup_from_hosts(
         with tqdm(list(hosts_to_resolve), desc="  Resolving hosts", unit="host") as pbar:
             for hostname in pbar:
                 try:
-                    # Skip entries that are already IP addresses
+                    # Skip entries that are already IP addresses (IPv4)
                     if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', hostname):
                         hostname_to_ips[hostname] = [hostname]
                         resolved_count += 1
                         pbar.set_postfix(resolved=resolved_count, failed=failed_count)
                         continue
                     
-                    # Resolve hostname to IP(s)
+                    # Skip entries that are already IPv6 addresses
+                    try:
+                        socket.inet_pton(socket.AF_INET6, hostname)
+                        hostname_to_ips[hostname] = [hostname]
+                        resolved_count += 1
+                        pbar.set_postfix(resolved=resolved_count, failed=failed_count)
+                        continue
+                    except (OSError, socket.error):
+                        pass
+                    
+                    # Resolve hostname to both IPv4 and IPv6 addresses
                     socket.setdefaulttimeout(2.0)
-                    ips = socket.gethostbyname_ex(hostname)[2]
+                    ips = []
+                    
+                    # Get all addresses (both IPv4 and IPv6)
+                    try:
+                        addr_info = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+                        for family, socktype, proto, canonname, sockaddr in addr_info:
+                            ip = sockaddr[0]
+                            if ip not in ips:
+                                ips.append(ip)
+                    except (socket.herror, socket.gaierror, OSError, socket.timeout):
+                        pass
+                    
                     hostname_to_ips[hostname] = ips
-                    resolved_count += 1
+                    if ips:
+                        resolved_count += 1
+                    else:
+                        failed_count += 1
                     pbar.set_postfix(resolved=resolved_count, failed=failed_count)
                     
                 except (socket.herror, socket.gaierror, OSError, socket.timeout):
@@ -209,6 +233,8 @@ def analyze_pcap_for_location_requests(
     """
     location_packets = []
     packet_num = 0
+    ipv4_count = 0
+    ipv6_count = 0
     
     print(f"  Analyzing {pcap_path.name}...")
     
@@ -306,6 +332,12 @@ def analyze_pcap_for_location_requests(
                     if ip is None or not isinstance(ip, (dpkt.ip.IP, dpkt.ip6.IP6)):
                         continue
                     
+                    # Count IPv4 and IPv6 packets
+                    if isinstance(ip, dpkt.ip.IP):
+                        ipv4_count += 1
+                    elif isinstance(ip, dpkt.ip6.IP6):
+                        ipv6_count += 1
+                    
                     # Get source and destination IPs
                     try:
                         if isinstance(ip, dpkt.ip.IP):
@@ -317,9 +349,7 @@ def analyze_pcap_for_location_requests(
                     except (OSError, ValueError) as e:
                         # Skip packets with malformed IP addresses
                         continue
-                
-                    import pdb; pdb.set_trace()
-                    
+                                    
                     # Check if this packet contains location sharing traffic
                     is_location_packet = False
                     
@@ -344,12 +374,17 @@ def analyze_pcap_for_location_requests(
                                 is_location_packet = True
                                 break
                     
-                    # Method 4: Try reverse DNS lookup on destination IPs (expensive, last resort)
+                    # Method 4: Try reverse DNS lookup on IPs (expensive, last resort)
+                    # For IPv6, check both src and dst since we don't have forward DNS cache
+                    # For IPv4, only check dst to reduce lookups
                     if not is_location_packet:
-                        for check_ip in [dst_ip]:  # Only check destination to reduce lookups
+                        ips_to_check = [src_ip, dst_ip] if isinstance(ip, dpkt.ip6.IP6) else [dst_ip]
+                        for check_ip in ips_to_check:
                             hostname = resolve_ip_to_hostname(check_ip)
                             if hostname and (hostname in location_hosts or is_find_my_friends_host(hostname)):
                                 is_location_packet = True
+                                # Cache this IP->hostname mapping for future use
+                                ip_lookup[check_ip] = hostname
                                 break
                     
                     if is_location_packet:
@@ -368,6 +403,8 @@ def analyze_pcap_for_location_requests(
         return []
     
     print(f"    Found {len(location_packets)} location sharing packets out of {packet_num} total packets")
+    print(f"    IPv4 packets: {ipv4_count}")
+    print(f"    IPv6 packets: {ipv6_count}")
     return location_packets
 
 
