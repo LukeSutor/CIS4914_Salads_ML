@@ -26,6 +26,48 @@ from src.models.mil_tcn import MILTCN
 from src.utils import load_config, seed_everything, binary_metrics
 
 
+def compute_class_weights(dataset: PcapLocationDataset, max_weight_bag: float, max_weight_inst: float) -> Tuple[float, float]:
+    """Compute positive class weights for bag-level and instance-level losses.
+    
+    Returns:
+        (bag_pos_weight, inst_pos_weight): Weights for positive class, capped at max values.
+    """
+    print("\nComputing class weights from training data...")
+    
+    # Count bag-level positives and negatives
+    bag_pos = 0
+    bag_neg = 0
+    inst_pos = 0
+    inst_neg = 0
+    
+    for i in range(len(dataset)):
+        sample = dataset[i]
+        y_bag = float(sample["y_bag"].item())
+        y_dense = sample["y_dense"]
+        length = int(sample["length"].item())
+        
+        # Bag-level counts
+        if y_bag > 0.5:
+            bag_pos += 1
+        else:
+            bag_neg += 1
+        
+        # Instance-level counts (only count valid positions)
+        inst_pos += int(y_dense[:length].sum().item())
+        inst_neg += length - int(y_dense[:length].sum().item())
+    
+    # Calculate weights (inverse frequency)
+    bag_pos_weight = min(bag_neg / max(bag_pos, 1), max_weight_bag)
+    inst_pos_weight = min(inst_neg / max(inst_pos, 1), max_weight_inst)
+    
+    print(f"  Bag-level: {bag_pos} positive, {bag_neg} negative")
+    print(f"  Bag pos_weight: {bag_pos_weight:.2f} (capped at {max_weight_bag})")
+    print(f"  Instance-level: {inst_pos} positive, {inst_neg} negative")
+    print(f"  Instance pos_weight: {inst_pos_weight:.2f} (capped at {max_weight_inst})")
+    
+    return bag_pos_weight, inst_pos_weight
+
+
 def build_dataloaders(cfg: Dict) -> Tuple[DataLoader, DataLoader]:
     data = cfg["data"]
     train_ds = PcapLocationDataset(
@@ -36,7 +78,7 @@ def build_dataloaders(cfg: Dict) -> Tuple[DataLoader, DataLoader]:
         time_range_s=tuple(data.get("time_range_s", [0.5, 5.0])),
         cache_dir=data.get("cache_dir"),
         device_ip=data.get("device_ip"),
-        windows_per_file=int(data.get("windows_per_file", 256)),
+        samples_per_packet=float(data.get("samples_per_packet", 0.05)),
         deterministic=bool(cfg.get("deterministic", False)),
     )
     val_ds = PcapLocationDataset(
@@ -47,7 +89,7 @@ def build_dataloaders(cfg: Dict) -> Tuple[DataLoader, DataLoader]:
         time_range_s=tuple(data.get("time_range_s", [0.5, 5.0])),
         cache_dir=data.get("cache_dir"),
         device_ip=data.get("device_ip"),
-        windows_per_file=int(data.get("val_windows_per_file", 128)),
+        samples_per_packet=float(data.get("val_samples_per_packet", 0.05)),
         deterministic=True,
     )
     bs = int(cfg["train"].get("batch_size", 16))
@@ -73,27 +115,34 @@ def build_model(cfg: Dict, in_features: int) -> MILTCN:
     return model
 
 
-def train_one_epoch(model: nn.Module, loader: DataLoader, device: torch.device, cfg: Dict, scaler: torch.cuda.amp.GradScaler, optimizer: torch.optim.Optimizer, epoch: int) -> Dict[str, float]:
+def train_one_epoch(model: nn.Module, loader: DataLoader, device: torch.device, cfg: Dict, scaler: torch.cuda.amp.GradScaler, optimizer: torch.optim.Optimizer, epoch: int, bag_pos_weight: torch.Tensor, inst_pos_weight: float) -> Dict[str, float]:
     model.train()
     losses = []
     m = []
-    crit_bag = nn.BCEWithLogitsLoss()
+    crit_bag = nn.BCEWithLogitsLoss(pos_weight=bag_pos_weight)
     lambda_inst = float(cfg["train"].get("lambda_instance", 0.0))
     crit_inst = nn.BCEWithLogitsLoss(reduction="none") if lambda_inst > 0 else None
     max_grad_norm = float(cfg["train"].get("max_grad_norm", 1.0))
+    
+    # Logging frequency: log every N batches (default: every 10 batches)
+    log_interval = int(cfg["train"].get("log_interval", 10))
+    total_batches = len(loader)
 
     pbar = tqdm(loader, desc=f"Epoch {epoch} [Train]", leave=False)
-    for batch in pbar:
+    for batch_idx, batch in enumerate(pbar, 1):
         x = batch["x"].to(device)
         mask = batch["mask"].to(device)
         y_bag = batch["y_bag"].to(device)
         y_dense = batch["y_dense"].to(device)
         optimizer.zero_grad(set_to_none=True)
-        with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+        with torch.amp.autocast('cuda', enabled=torch.cuda.is_available()):
             bag_logits, inst_logits = model(x, mask)
             loss = crit_bag(bag_logits, y_bag)
             if lambda_inst > 0 and crit_inst is not None:
                 inst_loss = crit_inst(inst_logits, y_dense)
+                # Apply instance-level weighting: positive samples get higher weight
+                inst_weights = torch.where(y_dense == 1.0, inst_pos_weight, 1.0)
+                inst_loss = inst_loss * inst_weights
                 inst_loss = (inst_loss * mask.float()).sum() / torch.clamp(mask.float().sum(), min=1.0)
                 loss = loss + lambda_inst * inst_loss
         # Backward + clip + step with AMP
@@ -108,6 +157,29 @@ def train_one_epoch(model: nn.Module, loader: DataLoader, device: torch.device, 
         
         # Update progress bar with current metrics
         pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+        
+        # Log to trackio at specified intervals
+        if batch_idx % log_interval == 0 or batch_idx == total_batches:
+            # Calculate running averages for logged batches
+            recent_losses = losses[-log_interval:] if len(losses) >= log_interval else losses
+            recent_metrics = m[-log_interval:] if len(m) >= log_interval else m
+            
+            if recent_metrics:
+                running_avg = {k: float(sum(d[k] for d in recent_metrics) / len(recent_metrics)) for k in recent_metrics[0]}
+                running_avg["loss"] = float(sum(recent_losses) / len(recent_losses))
+                
+                # Log intermediate training metrics with step information
+                global_step = (epoch - 1) * total_batches + batch_idx
+                trackio.log({
+                    "epoch": epoch,
+                    "batch": batch_idx,
+                    "global_step": global_step,
+                    "train_loss_running": running_avg['loss'],
+                    "train_accuracy_running": running_avg['accuracy'],
+                    "train_precision_running": running_avg['precision'],
+                    "train_recall_running": running_avg['recall'],
+                    "train_f1_running": running_avg['f1'],
+                })
 
     # Aggregate metrics
     if not m:
@@ -172,6 +244,14 @@ def main() -> None:
     train_loader, val_loader = build_dataloaders(cfg)
     in_features = train_loader.dataset.file_data[0]["feats"].shape[1]  # type: ignore
 
+    # Compute class weights for imbalanced data
+    max_weight_bag = float(cfg["train"].get("max_pos_weight_bag", 10.0))
+    max_weight_inst = float(cfg["train"].get("max_pos_weight_inst", 100.0))
+    bag_pos_weight, inst_pos_weight = compute_class_weights(
+        train_loader.dataset, max_weight_bag, max_weight_inst
+    )
+    bag_pos_weight_tensor = torch.tensor([bag_pos_weight], device=device)
+
     model = build_model(cfg, in_features).to(device)
     opt_cfg = cfg["train"]
     lr = float(opt_cfg.get("lr", 1e-3))
@@ -190,7 +270,7 @@ def main() -> None:
     print("-" * 60)
     
     for epoch in range(1, epochs + 1):
-        tr = train_one_epoch(model, train_loader, device, cfg, scaler, optimizer, epoch)
+        tr = train_one_epoch(model, train_loader, device, cfg, scaler, optimizer, epoch, bag_pos_weight_tensor, inst_pos_weight)
         va = evaluate(model, val_loader, device, epoch)
         
         # Log metrics to trackio
