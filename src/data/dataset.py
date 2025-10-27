@@ -58,7 +58,7 @@ class PcapLocationDataset(Dataset):
         time_range_s: Tuple[float, float] = (0.5, 5.0),
         cache_dir: Optional[str | Path] = None,
         device_ip: Optional[str] = None,
-        windows_per_file: int = 256,
+        samples_per_packet: float = 0.05,  # Number of samples per packet (e.g., 0.05 = 50 samples per 1000 packets)
         deterministic: bool = False,
     ) -> None:
         super().__init__()
@@ -70,7 +70,7 @@ class PcapLocationDataset(Dataset):
         self.time_range_s = time_range_s
         self.cache_dir = cache_dir
         self.device_ip = device_ip
-        self.windows_per_file = int(windows_per_file)
+        self.samples_per_packet = float(samples_per_packet)
         self.deterministic = deterministic
 
         self.pairs: List[Tuple[Path, Path]] = []
@@ -94,7 +94,7 @@ class PcapLocationDataset(Dataset):
                 }
             )
 
-        # Build sampling index: each file contributes windows_per_file virtual samples
+        # Build sampling index: each file contributes samples proportional to its length
         self.index: List[Tuple[int, int, int]] = []  # (file_idx, start, end)
         rng = np.random.default_rng(1234 if deterministic else None)
         for fi, d in enumerate(self.file_data):
@@ -102,8 +102,10 @@ class PcapLocationDataset(Dataset):
             n = feats.shape[0]
             if n == 0:
                 continue
+            # Calculate number of windows based on file length
+            num_windows = max(1, int(n * self.samples_per_packet))
             if self.sample_by == "packets":
-                for _ in range(self.windows_per_file):
+                for _ in range(num_windows):
                     L = int(rng.integers(self.min_len, self.max_len + 1))
                     if L >= n:
                         s = 0
@@ -118,7 +120,7 @@ class PcapLocationDataset(Dataset):
                 cumtime = np.cumsum(iadelta)  # approximate cumulative time
                 tmin, tmax = float(cumtime[0]), float(cumtime[-1])
                 total = max(1e-6, tmax - tmin)
-                for _ in range(self.windows_per_file):
+                for _ in range(num_windows):
                     dur = rng.uniform(self.time_range_s[0], self.time_range_s[1])
                     t0 = rng.uniform(tmin, max(tmin, tmax - dur))
                     t1 = t0 + dur
