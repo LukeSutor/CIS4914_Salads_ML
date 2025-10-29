@@ -6,7 +6,8 @@ This script analyzes PCAP files in the train and val folders and creates JSON la
 indicating which packets contain location sharing requests. It identifies location
 sharing based on:
 1. Hostnames in locationsharing_hosts.txt
-2. Find My Friends servers matching pattern: ^(p[0-9]{1,3}-fmfmobile.icloud.com|p[0-9]{1,3}-fmf.icloud.com)$
+2. Find My Friends/iPhone servers matching pattern: ^(p[0-9]{1,3}-fmfmobile.icloud.com|p[0-9]{1,3}-fmf.icloud.com|p[0-9]{1,3}-fmip.icloud.com)$
+3. TLS Client Hello SNI (Server Name Indication) extraction
 
 The JSON output contains 1-indexed packet numbers for compatibility with Wireshark.
 
@@ -186,8 +187,8 @@ def build_ip_lookup_from_hosts(
 
 
 def is_find_my_friends_host(hostname: str) -> bool:
-    """Check if hostname matches Find My Friends server pattern."""
-    pattern = r'^(p[0-9]{1,3}-fmfmobile\.icloud\.com|p[0-9]{1,3}-fmf\.icloud\.com)$'
+    """Check if hostname matches Find My Friends or Find My iPhone server pattern."""
+    pattern = r'^(p[0-9]{1,3}-fmfmobile\.icloud\.com|p[0-9]{1,3}-fmf\.icloud\.com|p[0-9]{1,3}-fmip\.icloud\.com)$'
     return bool(re.match(pattern, hostname.lower()))
 
 
@@ -235,6 +236,11 @@ def analyze_pcap_for_location_requests(
     packet_num = 0
     ipv4_count = 0
     ipv6_count = 0
+    
+    # Dynamic IP-to-hostname mapping built from SNI in this capture
+    # This helps resolve hostnames for packets that come AFTER the ClientHello
+    sni_ip_mapping: Dict[str, str] = {}
+    sni_extracted_count = 0
     
     print(f"  Analyzing {pcap_path.name}...")
     
@@ -349,6 +355,31 @@ def analyze_pcap_for_location_requests(
                     except (OSError, ValueError) as e:
                         # Skip packets with malformed IP addresses
                         continue
+                    
+                    # FIRST: Try to extract SNI from this packet and update our mapping
+                    # This should happen BEFORE we check if it's a location packet
+                    # so we can use SNI info for subsequent packets to the same IP
+                    if hasattr(ip, 'data') and isinstance(ip.data, dpkt.tcp.TCP):
+                        tcp = ip.data
+                        if hasattr(tcp, 'data') and len(tcp.data) > 0:
+                            # Check if this looks like a TLS packet
+                            # Note: TLS Client Hello might be split across multiple TCP segments
+                            # We check the first byte for 0x16 (TLS Handshake)
+                            if len(tcp.data) > 0 and tcp.data[0] == 0x16:
+                                # Extract SNI hostnames from this packet
+                                # Note: This may fail if the Client Hello is fragmented across TCP segments
+                                sni_hostnames = extract_tls_sni(tcp.data)
+                                if sni_hostnames:
+                                    # Map destination IP to the SNI hostname
+                                    # (Client is connecting TO this IP with this hostname)
+                                    for sni_hostname in sni_hostnames:
+                                        if dst_ip not in sni_ip_mapping:
+                                            sni_ip_mapping[dst_ip] = sni_hostname
+                                            sni_extracted_count += 1
+                                            # Also add to global ip_lookup for future use
+                                            if dst_ip not in ip_lookup:
+                                                ip_lookup[dst_ip] = sni_hostname
+                                        break  # Use first valid SNI hostname
                                     
                     # Check if this packet contains location sharing traffic
                     is_location_packet = False
@@ -356,17 +387,29 @@ def analyze_pcap_for_location_requests(
                     # Method 1: Fast IP lookup in pre-resolved table
                     for check_ip in [src_ip, dst_ip]:
                         if check_ip in ip_lookup:
-                            is_location_packet = True
-                            break
+                            hostname = ip_lookup[check_ip]
+                            if hostname in location_hosts or is_find_my_friends_host(hostname):
+                                is_location_packet = True
+                                break
                     
-                    # Method 2: Check direct IP matches against location hosts
+                    # Method 2: Check SNI-based mapping from THIS capture
+                    # This catches packets to IPs we've seen in ClientHellos earlier
+                    if not is_location_packet:
+                        for check_ip in [src_ip, dst_ip]:
+                            if check_ip in sni_ip_mapping:
+                                hostname = sni_ip_mapping[check_ip]
+                                if hostname in location_hosts or is_find_my_friends_host(hostname):
+                                    is_location_packet = True
+                                    break
+                    
+                    # Method 3: Check direct IP matches against location hosts
                     if not is_location_packet:
                         for check_ip in [src_ip, dst_ip]:
                             if check_ip in location_hosts:
                                 is_location_packet = True
                                 break
                     
-                    # Method 3: Extract hostname from packet content and check patterns
+                    # Method 4: Extract hostname from packet content and check patterns
                     if not is_location_packet and hasattr(ip, 'data'):
                         hostnames = extract_hostnames_from_packet(ip)
                         for hostname in hostnames:
@@ -374,7 +417,7 @@ def analyze_pcap_for_location_requests(
                                 is_location_packet = True
                                 break
                     
-                    # Method 4: Try reverse DNS lookup on IPs (expensive, last resort)
+                    # Method 5: Try reverse DNS lookup on IPs (expensive, last resort)
                     # For IPv6, check both src and dst since we don't have forward DNS cache
                     # For IPv4, only check dst to reduce lookups
                     if not is_location_packet:
@@ -405,6 +448,7 @@ def analyze_pcap_for_location_requests(
     print(f"    Found {len(location_packets)} location sharing packets out of {packet_num} total packets")
     print(f"    IPv4 packets: {ipv4_count}")
     print(f"    IPv6 packets: {ipv6_count}")
+    print(f"    SNI hostnames extracted: {sni_extracted_count} unique IP->hostname mappings")
     return location_packets
 
 
@@ -458,41 +502,161 @@ def extract_hostnames_from_packet(ip_packet) -> List[str]:
 
 
 def extract_tls_sni(packet_data: bytes) -> List[str]:
-    """Extract Server Name Indication from TLS packets."""
+    """Extract Server Name Indication from TLS Client Hello packets.
+    
+    This function parses TLS ClientHello messages to extract the SNI extension,
+    which contains the hostname the client is trying to connect to.
+    
+    TLS ClientHello structure:
+    - Content Type: 0x16 (Handshake)
+    - Version: 2 bytes
+    - Length: 2 bytes
+    - Handshake Type: 0x01 (ClientHello)
+    - Length: 3 bytes
+    - Version: 2 bytes
+    - Random: 32 bytes
+    - Session ID Length: 1 byte
+    - Session ID: variable
+    - Cipher Suites Length: 2 bytes
+    - Cipher Suites: variable
+    - Compression Methods Length: 1 byte
+    - Compression Methods: variable
+    - Extensions Length: 2 bytes
+    - Extensions: variable
+        - Extension Type: 2 bytes (0x0000 for SNI)
+        - Extension Length: 2 bytes
+        - Server Name List Length: 2 bytes
+        - Server Name Type: 1 byte (0x00 for hostname)
+        - Server Name Length: 2 bytes
+        - Server Name: variable
+    """
     hostnames = []
     
     try:
-        # Look for TLS handshake patterns
-        # This is a simplified approach - full TLS parsing would be more complex
         data = packet_data
         
-        # Look for TLS handshake (0x16) followed by version
-        if len(data) < 50:  # Too short for TLS handshake
+        # Minimum size for TLS ClientHello with SNI
+        if len(data) < 50:
             return hostnames
+        
+        # Check if this is a TLS Handshake record (0x16)
+        if len(data) < 1 or data[0] != 0x16:
+            return hostnames
+        
+        # Parse TLS record header
+        # Byte 0: Content Type (0x16 for Handshake)
+        # Bytes 1-2: TLS Version
+        # Bytes 3-4: Record Length
+        if len(data) < 5:
+            return hostnames
+        
+        record_length = int.from_bytes(data[3:5], 'big')
+        
+        # Note: For fragmented TCP packets, we might not have the complete record
+        # We'll try to parse what we have, but be aware it might fail
+        
+        # Parse Handshake header
+        # Byte 5: Handshake Type (0x01 for ClientHello)
+        if len(data) < 6 or data[5] != 0x01:
+            return hostnames
+        
+        # Bytes 6-8: Handshake Length
+        if len(data) < 9:
+            return hostnames
+        
+        # Skip to after ClientHello fixed fields
+        # 9-10: Client Version (2 bytes)
+        # 11-42: Random (32 bytes)
+        # 43: Session ID Length (1 byte)
+        if len(data) < 44:
+            return hostnames
+        
+        offset = 43
+        session_id_length = data[offset]
+        offset += 1 + session_id_length
+        
+        # Cipher Suites Length (2 bytes)
+        if len(data) < offset + 2:
+            return hostnames
+        
+        cipher_suites_length = int.from_bytes(data[offset:offset+2], 'big')
+        offset += 2 + cipher_suites_length
+        
+        # Compression Methods Length (1 byte)
+        if len(data) < offset + 1:
+            return hostnames
+        
+        compression_methods_length = data[offset]
+        offset += 1 + compression_methods_length
+        
+        # Extensions Length (2 bytes)
+        if len(data) < offset + 2:
+            return hostnames
+        
+        extensions_length = int.from_bytes(data[offset:offset+2], 'big')
+        offset += 2
+        
+        # Parse extensions
+        extensions_end = offset + extensions_length
+        while offset + 4 <= extensions_end and offset + 4 <= len(data):
+            # Extension Type (2 bytes)
+            ext_type = int.from_bytes(data[offset:offset+2], 'big')
+            offset += 2
             
-        # Search for SNI extension (type 0x0000)
-        i = 0
-        while i < len(data) - 10:
-            # Look for SNI extension pattern
-            if (data[i:i+2] == b'\x00\x00' and  # SNI extension type
-                i + 9 < len(data)):
+            # Extension Length (2 bytes)
+            ext_length = int.from_bytes(data[offset:offset+2], 'big')
+            offset += 2
+            
+            # Check if this is the SNI extension (type 0x0000)
+            if ext_type == 0x0000 and offset + ext_length <= len(data):
+                # Parse SNI extension
+                sni_offset = offset
                 
-                # Try to read the hostname length and data
-                try:
-                    # Skip extension length fields
-                    hostname_len_offset = i + 7
-                    if hostname_len_offset + 2 < len(data):
-                        hostname_len = int.from_bytes(data[hostname_len_offset:hostname_len_offset+2], 'big')
-                        if (hostname_len > 0 and hostname_len < 253 and 
-                            hostname_len_offset + 2 + hostname_len <= len(data)):
-                            hostname_bytes = data[hostname_len_offset+2:hostname_len_offset+2+hostname_len]
-                            hostname = hostname_bytes.decode('utf-8', errors='ignore').lower().strip()
-                            if hostname and '.' in hostname:
-                                hostnames.append(hostname)
-                except Exception:
-                    pass
-            i += 1
+                # Server Name List Length (2 bytes)
+                if sni_offset + 2 > len(data):
+                    break
+                
+                sni_list_length = int.from_bytes(data[sni_offset:sni_offset+2], 'big')
+                sni_offset += 2
+                
+                # Parse server names
+                sni_list_end = sni_offset + sni_list_length
+                while sni_offset + 3 <= sni_list_end and sni_offset + 3 <= len(data):
+                    # Server Name Type (1 byte) - 0x00 for hostname
+                    name_type = data[sni_offset]
+                    sni_offset += 1
+                    
+                    # Server Name Length (2 bytes)
+                    if sni_offset + 2 > len(data):
+                        break
+                    
+                    name_length = int.from_bytes(data[sni_offset:sni_offset+2], 'big')
+                    sni_offset += 2
+                    
+                    # Server Name
+                    if sni_offset + name_length > len(data):
+                        break
+                    
+                    if name_type == 0x00 and name_length > 0 and name_length < 256:
+                        hostname_bytes = data[sni_offset:sni_offset+name_length]
+                        try:
+                            hostname = hostname_bytes.decode('ascii').lower().strip()
+                            # Validate hostname format
+                            if hostname and '.' in hostname and len(hostname) >= 4:
+                                # Basic domain validation
+                                if re.match(r'^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$', hostname):
+                                    hostnames.append(hostname)
+                        except (UnicodeDecodeError, AttributeError):
+                            pass
+                    
+                    sni_offset += name_length
+                
+                # Found SNI extension, no need to continue
+                break
             
+            # Move to next extension
+            offset += ext_length
+    
     except Exception:
         pass
     
