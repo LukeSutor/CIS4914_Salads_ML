@@ -16,16 +16,16 @@ data:
   val_samples_per_packet: 0.05
 
 model:
-  hid_channels: [128, 128, 256]
-  kernel_size: 3
-  dropout: 0.1
-  mil_hidden: 128
+  hid_channels: [128, 128, 256, 256, 512]
+  kernel_size: 5
+  dropout: 0.2
+  mil_hidden: 256
   use_noisy_or: true
 
 train:
   epochs: 50
   batch_size: 64
-  num_workers: 0
+  num_workers: 4
   lr: 1.0e-4
   weight_decay: 1.0e-4
   lambda_instance: 0.25
