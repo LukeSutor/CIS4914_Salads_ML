@@ -30,6 +30,6 @@ train:
   weight_decay: 1.0e-4
   lambda_instance: 0.25
   max_grad_norm: 1.0
-  max_pos_weight_bag: 100.0    # Cap for bag-level positive class weight
-  max_pos_weight_inst: 10000.0  # Cap for instance-level positive class weight
-  log_interval: 100            # Log to trackio every N batches during training
+  max_pos_weight_bag: 10.0    # Cap for bag-level positive class weight
+  max_pos_weight_inst: 100.0  # Cap for instance-level positive class weight
+  log_interval: 50            # Log to trackio every N batches during training
