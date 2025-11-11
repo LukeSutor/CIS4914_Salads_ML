@@ -1,6 +1,6 @@
-# Experiment Data Collection – Find My Packet Capture Protocol
+# Experiment Data Collection – Packet Capture Protocol
 
-This document explains how to collect, organize, and share packet capture (pcap) files for all location-sharing experiments with Apple Find My, as performed in this project. Follow these steps for any new experiment to guarantee consistent and reproducible results.
+This document explains how to collect, organize, and share packet capture (pcap) files for all location-sharing experiments with Apple Find My or Life360, as performed in this project. Follow these steps for any new experiment to guarantee consistent and reproducible results.
 
 ***
 
@@ -9,9 +9,9 @@ This document explains how to collect, organize, and share packet capture (pcap)
   - Wireshark installed
   - Command line tools (`xcode-select --install`)
   - Access to Terminal
-- **Two iPhones:**
+- **Two or more iPhones/iPads:**
   - One as "surveilled" device (sharing its location)
-  - One as "surveilling" device (actively querying or viewing location)
+  - One or more as "surveilling" devices (actively querying or viewing location)
 - **USB/USB-C** Connector Cables
 
 ***
@@ -19,9 +19,9 @@ This document explains how to collect, organize, and share packet capture (pcap)
 ## 2. Pre-Experiment Setup
 
 - Ensure **Wireshark** is installed on your MacBook (https://www.wireshark.org/download.html).
-- On both iPhones:
-  - Enable location sharing with each other in the Find My app (‘Share My Location’ and specify the other phone to share with).
-  - Make sure both devices are signed into iCloud and have granted necessary permissions.
+- On all devices:
+  - Enable location sharing with each other in the Find My app or Life360 circle (‘Share My Location’ and specify the other phone to share with).
+  - Make sure all devices are signed into iCloud and have granted necessary permissions.
 
 ***
 
@@ -57,7 +57,7 @@ This document explains how to collect, organize, and share packet capture (pcap)
    - Set scenario parameters (e.g., idle, query once per minute, query twice per minute, etc.).
    - For *active querying*: On the surveilling device, open Find My, select the other device, and trigger location queries at the experimental timing (for example, tap/refresh once per minute).
    - For *idle*: Simply leave Find My open or in the background as specified by scenario.
-   - **Let the experiment run for at least 10 minutes per scenario.**
+   - **Let the experiment run for at least 5 minutes per scenario.**
    - Use a timer to standardize query intervals.
 
 6. **Finish and Save the Capture:**
