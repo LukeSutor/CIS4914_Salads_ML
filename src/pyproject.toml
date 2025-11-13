@@ -12,6 +12,7 @@ dependencies = [
     "trackio",
     "pyyaml",
     "dpkt",
+    "coremltools>=9.0",
 ]
 
 [[tool.uv.index]]

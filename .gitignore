@@ -11,3 +11,6 @@ runs/
 active_queries.pcapng
 once_per_min.pcapng
 staggered_u.pcapng
+
+# Apple CoreML Models
+*.mlpackage
