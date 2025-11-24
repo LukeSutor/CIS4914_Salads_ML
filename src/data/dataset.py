@@ -141,15 +141,19 @@ class PcapLocationDataset(Dataset):
         # For simplicity, compute global mean/std with clipping.
         feats_all = np.concatenate([d["feats"] for d in self.file_data if ((d["feats"]).shape[0] > 0)], axis=0)  # type: ignore
         
+        # We assume all files have same feature names.
+        feat_names = self.file_data[0]["feat_names"]
+        self.log_indices = [i for i, n in enumerate(feat_names) if n in ["length", "iadelta"]]
+
+        # Apply log1p to continuous features for stats computation
+        if self.log_indices:
+            for idx in self.log_indices:
+                feats_all[:, idx] = np.log1p(feats_all[:, idx])
+
         # Compute global stats
         g_mean = np.nanmean(feats_all, axis=0)
         g_std = np.nanstd(feats_all, axis=0)
 
-        # We only want to normalize continuous features: length, iadelta.
-        # Others (flags, direction) should stay as is (0/1 or -1/0/1).
-        # We assume all files have same feature names.
-        feat_names = self.file_data[0]["feat_names"]
-        
         self.feat_mean = np.zeros_like(g_mean, dtype=np.float32)
         self.feat_std = np.ones_like(g_std, dtype=np.float32)
 
@@ -177,10 +181,15 @@ class PcapLocationDataset(Dataset):
         d = self.file_data[fi]
         feats: np.ndarray = d["feats"]  # type: ignore
         pos_idxs: np.ndarray = d["pos_idxs"]  # type: ignore
-        x = feats[s:e]
+        x = feats[s:e].copy()
         n = x.shape[0]
         y_dense = self._labels_dense(pos_idxs - s, n)
         y_bag = float(y_dense.max() if n > 0 else 0.0)
+
+        # Log transform continuous features
+        if hasattr(self, "log_indices"):
+            for idx in self.log_indices:
+                x[:, idx] = np.log1p(x[:, idx])
 
         # Normalize numeric features
         x = (x - self.feat_mean) / self.feat_std

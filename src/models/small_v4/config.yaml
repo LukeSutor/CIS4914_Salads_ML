@@ -1,0 +1,35 @@
+seed: 42
+deterministic: true
+out_dir: runs/mil_tcn_v1
+run_name: mil_tcn_v2
+
+data:
+  train_folders: ["/blue/rcstudents/luke.sutor/CIS4914_Salads_ML/data/train"]
+  val_folders: ["/blue/rcstudents/luke.sutor/CIS4914_Salads_ML/data/val"]
+  cache_dir: "/blue/rcstudents/luke.sutor/CIS4914_Salads_ML/data/.cache"
+  device_ip: null
+  sample_by: "packets"  # or "time"
+  min_len: 20
+  max_len: 300
+  time_range_s: [0.5, 5.0]
+  samples_per_packet: 0.05  # Number of samples per packet (0.05 = 50 samples per 1000 packets)
+  val_samples_per_packet: 0.05
+
+model:
+  hid_channels: [128, 128, 256, 256, 512]
+  kernel_size: 5
+  dropout: 0.2
+  mil_hidden: 256
+  use_noisy_or: true
+
+train:
+  epochs: 100
+  batch_size: 128
+  num_workers: 0
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  lambda_instance: 0.25
+  max_grad_norm: 1.0
+  max_pos_weight_bag: 10.0    # Cap for bag-level positive class weight
+  max_pos_weight_inst: 100.0  # Cap for instance-level positive class weight
+  log_interval: 50            # Log to trackio every N batches during training
