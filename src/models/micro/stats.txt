@@ -1,0 +1,7 @@
+Computing class weights from training data...
+  Bag-level: 6840 positive, 61683 negative
+  Bag pos_weight: 9.02 (capped at 10.0)
+  Instance-level: 209696 positive, 10750695 negative
+  Instance pos_weight: 51.27 (capped at 100.0)
+Model has 98275 trainable parameters
+epoch 090 | loss 0.8106 | acc 0.831 | f1 0.498 || val_loss 0.4988 | val_acc 0.851 | val_f1 0.652

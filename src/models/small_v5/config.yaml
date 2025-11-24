@@ -1,7 +1,7 @@
 seed: 42
 deterministic: true
 out_dir: runs/mil_tcn_v1
-run_name: mil_tcn_micro
+run_name: mil_tcn_small_v5
 
 data:
   train_folders: ["C:\\Users\\Luke\\Desktop\\UF\\senior-project\\ml\\data\\train"]
@@ -12,24 +12,24 @@ data:
   min_len: 20
   max_len: 300
   time_range_s: [0.5, 5.0]
-  samples_per_packet: 0.05  # Number of samples per packet (0.05 = 50 samples per 1000 packets)
+  samples_per_packet: 0.10  # Increased from 0.05 to see more data variations
   val_samples_per_packet: 0.05
 
 model:
-  hid_channels: [32, 32, 64, 64]
+  hid_channels: [64, 64, 128, 128]
   kernel_size: 5
-  dropout: 0.4
-  mil_hidden: 32
+  dropout: 0.3
+  mil_hidden: 64
   use_noisy_or: true
 
 train:
   epochs: 100
   batch_size: 128
   num_workers: 0
-  lr: 1.0e-4
+  lr: 5.0e-4  # Slightly higher initial LR, will be reduced by scheduler
   weight_decay: 1.0e-3
   lambda_instance: 0.25
   max_grad_norm: 1.0
-  max_pos_weight_bag: 10.0    # Cap for bag-level positive class weight
-  max_pos_weight_inst: 100.0  # Cap for instance-level positive class weight
-  log_interval: 50            # Log to trackio every N batches during training
+  max_pos_weight_bag: 10.0
+  max_pos_weight_inst: 100.0
+  log_interval: 50

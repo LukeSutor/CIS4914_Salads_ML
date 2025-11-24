@@ -257,6 +257,9 @@ def main() -> None:
     lr = float(opt_cfg.get("lr", 1e-3))
     wd = float(opt_cfg.get("weight_decay", 1e-4))
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='max', factor=0.5, patience=10, verbose=True
+    )
     scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
 
     out_dir = Path(cfg.get("out_dir", "runs"))
@@ -274,8 +277,10 @@ def main() -> None:
         va = evaluate(model, val_loader, device, epoch)
         
         # Log metrics to trackio
+        current_lr = optimizer.param_groups[0]["lr"]
         trackio.log({
             "epoch": epoch,
+            "lr": current_lr,
             "train_loss": tr['loss'],
             "train_accuracy": tr['accuracy'],
             "train_precision": tr['precision'],
@@ -288,7 +293,10 @@ def main() -> None:
             "val_f1": va['f1'],
         })
         
-        print(f"epoch {epoch:03d} | loss {tr['loss']:.4f} | acc {tr['accuracy']:.3f} | f1 {tr['f1']:.3f} || val_loss {va['val_loss']:.4f} | val_acc {va['accuracy']:.3f} | val_f1 {va['f1']:.3f}")
+        print(f"epoch {epoch:03d} | lr {current_lr:.2e} | loss {tr['loss']:.4f} | acc {tr['accuracy']:.3f} | f1 {tr['f1']:.3f} || val_loss {va['val_loss']:.4f} | val_acc {va['accuracy']:.3f} | val_f1 {va['f1']:.3f}")
+
+        # Step scheduler based on validation F1
+        scheduler.step(va["f1"])
 
         # Save latest
         latest_path = out_dir / "checkpoint_latest.pt"
