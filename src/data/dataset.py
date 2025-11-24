@@ -140,8 +140,24 @@ class PcapLocationDataset(Dataset):
         # Common feature normalization: robust per-feature scale using med/IQR per file then averaged.
         # For simplicity, compute global mean/std with clipping.
         feats_all = np.concatenate([d["feats"] for d in self.file_data if ((d["feats"]).shape[0] > 0)], axis=0)  # type: ignore
-        self.feat_mean = np.clip(np.nanmean(feats_all, axis=0), -1e6, 1e6).astype(np.float32)
-        self.feat_std = np.clip(np.nanstd(feats_all, axis=0) + 1e-6, 1e-6, 1e6).astype(np.float32)
+        
+        # Compute global stats
+        g_mean = np.nanmean(feats_all, axis=0)
+        g_std = np.nanstd(feats_all, axis=0)
+
+        # We only want to normalize continuous features: length, iadelta.
+        # Others (flags, direction) should stay as is (0/1 or -1/0/1).
+        # We assume all files have same feature names.
+        feat_names = self.file_data[0]["feat_names"]
+        
+        self.feat_mean = np.zeros_like(g_mean, dtype=np.float32)
+        self.feat_std = np.ones_like(g_std, dtype=np.float32)
+
+        for i, name in enumerate(feat_names):
+            if name in ["length", "iadelta"]:
+                self.feat_mean[i] = np.clip(g_mean[i], -1e6, 1e6)
+                self.feat_std[i] = np.clip(g_std[i] + 1e-6, 1e-6, 1e6)
+            # else: keep mean=0, std=1 so (x-0)/1 = x
 
     def __len__(self) -> int:
         return len(self.index)
