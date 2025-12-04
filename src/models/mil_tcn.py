@@ -6,7 +6,6 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.utils import weight_norm
 
 
 class Chomp1d(nn.Module):
@@ -25,17 +24,24 @@ class TemporalBlock(nn.Module):
         super().__init__()
         pad = (kernel_size - 1) * dilation
         self.net = nn.Sequential(
-            weight_norm(nn.Conv1d(in_ch, out_ch, kernel_size, padding=pad, dilation=dilation)),
+            nn.Conv1d(in_ch, out_ch, kernel_size, padding=pad, dilation=dilation),
             Chomp1d(pad),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
-            weight_norm(nn.Conv1d(out_ch, out_ch, kernel_size, padding=pad, dilation=dilation)),
+            nn.Conv1d(out_ch, out_ch, kernel_size, padding=pad, dilation=dilation),
             Chomp1d(pad),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
         )
         self.downsample = nn.Conv1d(in_ch, out_ch, 1) if in_ch != out_ch else None
-        # self.init_weights()  # weight_norm handles initialization or default is fine
+        self.init_weights()
+
+    def init_weights(self) -> None:
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.net(x)
