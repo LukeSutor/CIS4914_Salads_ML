@@ -13,6 +13,7 @@ dependencies = [
     "pyyaml",
     "dpkt",
     "coremltools>=9.0",
+    "scikit-learn",
 ]
 
 [[tool.uv.index]]

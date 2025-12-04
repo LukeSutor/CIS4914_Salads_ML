@@ -93,6 +93,8 @@ def eval_on_pcap(model: MILTCN, device: torch.device, feats: np.ndarray, wins: L
             y_bags.append(y_bag)
             y_bags_pred.append(float(torch.sigmoid(torch.tensor(logit)).item() >= 0.5))
 
+        results["y_bags"] = np.array(y_bags)
+
         y_bags_t = torch.tensor(y_bags).unsqueeze(1)
         bag_logits_t = torch.tensor(results["bag_logits"]).unsqueeze(1)
         bag_metrics = binary_metrics(bag_logits_t, y_bags_t)
@@ -100,6 +102,7 @@ def eval_on_pcap(model: MILTCN, device: torch.device, feats: np.ndarray, wins: L
         # instance-level aggregated across all windows
         tp = fp = tn = fn = 0
         eps = 1e-9
+        all_y_inst = []
         for (s, e), inst_logit in zip(wins, results["inst_logits"]):
             L = e - s
             y_inst = np.zeros((L,), dtype=np.int64)
@@ -107,11 +110,15 @@ def eval_on_pcap(model: MILTCN, device: torch.device, feats: np.ndarray, wins: L
             m = labels[(labels >= s) & (labels < e)]
             if m.size > 0:
                 y_inst[(m - s).astype(int)] = 1
+            all_y_inst.append(y_inst)
+
             preds = (1.0 / (1.0 + np.exp(-inst_logit))) >= 0.5
             tp += int(((preds == 1) & (y_inst == 1)).sum())
             tn += int(((preds == 0) & (y_inst == 0)).sum())
             fp += int(((preds == 1) & (y_inst == 0)).sum())
             fn += int(((preds == 0) & (y_inst == 1)).sum())
+
+        results["y_insts"] = all_y_inst
 
         prec = tp / max(eps, (tp + fp))
         rec = tp / max(eps, (tp + fn))

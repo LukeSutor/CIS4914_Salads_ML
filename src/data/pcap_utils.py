@@ -93,57 +93,107 @@ def _parse_packet(ts: float, buf: bytes) -> Tuple[PacketFeatures, Dict[str, str]
     import dpkt  # type: ignore
 
     length = len(buf)
-    l3_ipv6 = 0
     l4_tcp = l4_udp = l4_icmp = 0
     src_ip = dst_ip = None
     src_port = dst_port = 0
     tcp_syn = tcp_ack = tcp_fin = tcp_rst = 0
+    flow_hash = 0
 
+    ip = None
+    
+    # Try Ethernet
     try:
         eth = dpkt.ethernet.Ethernet(buf)
-        ip = None
-        if isinstance(eth.data, dpkt.ip.IP):
+        if isinstance(eth.data, (dpkt.ip.IP, dpkt.ip6.IP6)):
             ip = eth.data
-            src_ip = ipaddress.ip_address(ip.src).compressed
-            dst_ip = ipaddress.ip_address(ip.dst).compressed
-        elif isinstance(eth.data, dpkt.ip6.IP6):
-            ip = eth.data
-            src_ip = ipaddress.ip_address(ip.src).compressed
-            dst_ip = ipaddress.ip_address(ip.dst).compressed
-        else:
-            # Non-IP traffic
-            pf = PacketFeatures(
-                length=length,
-                l4_tcp=0,
-                l4_udp=0,
-                l4_icmp=0,
-                direction_out=-1,
-                src_port=0,
-                dst_port=0,
-                tcp_syn=0,
-                tcp_ack=0,
-                tcp_fin=0,
-                tcp_rst=0,
-                flow_hash=0,
-            )
-            return pf, {"src_ip": "", "dst_ip": ""}
+    except Exception:
+        pass
 
-        # L4
-        if isinstance(ip.data, dpkt.tcp.TCP):
+    # Try SLL (Linux Cooked Capture) if not Ethernet IP
+    if ip is None:
+        try:
+            sll = dpkt.sll.SLL(buf)
+            if isinstance(sll.data, (dpkt.ip.IP, dpkt.ip6.IP6)):
+                ip = sll.data
+        except Exception:
+            pass
+
+    # Try Loopback if still nothing
+    if ip is None:
+        try:
+            loop = dpkt.loopback.Loopback(buf)
+            if isinstance(loop.data, (dpkt.ip.IP, dpkt.ip6.IP6)):
+                ip = loop.data
+        except Exception:
+            pass
+
+    # Try Raw IP (heuristic)
+    if ip is None:
+        if len(buf) >= 1:
+            v = buf[0] >> 4
+            if v == 4:
+                try:
+                    ip = dpkt.ip.IP(buf)
+                except Exception:
+                    pass
+            elif v == 6:
+                try:
+                    ip = dpkt.ip6.IP6(buf)
+                except Exception:
+                    pass
+
+    if ip is not None:
+        try:
+            if isinstance(ip, dpkt.ip.IP):
+                src_ip = ipaddress.ip_address(ip.src).compressed
+                dst_ip = ipaddress.ip_address(ip.dst).compressed
+            elif isinstance(ip, dpkt.ip6.IP6):
+                src_ip = ipaddress.ip_address(ip.src).compressed
+                dst_ip = ipaddress.ip_address(ip.dst).compressed
+        except ValueError:
+            pass
+    else:
+        # Non-IP traffic or unparseable
+        pf = PacketFeatures(
+            length=length,
+            l4_tcp=0,
+            l4_udp=0,
+            l4_icmp=0,
+            direction_out=-1,
+            src_port=0,
+            dst_port=0,
+            tcp_syn=0,
+            tcp_ack=0,
+            tcp_fin=0,
+            tcp_rst=0,
+            flow_hash=0,
+        )
+        return pf, {"src_ip": "", "dst_ip": ""}
+
+    # L4
+    try:
+        if isinstance(ip, (dpkt.ip.IP, dpkt.ip6.IP6)):
+             # For Raw IP, ip is the packet itself, so ip.data is the payload
+             l4_payload = ip.data
+        else:
+             # Should not happen given logic above, but for safety
+             l4_payload = ip.data
+
+        if isinstance(l4_payload, dpkt.tcp.TCP):
             l4_tcp = 1
-            tcp = ip.data
+            tcp = l4_payload
             src_port = int(tcp.sport)
             dst_port = int(tcp.dport)
             tcp_syn = int((tcp.flags & dpkt.tcp.TH_SYN) != 0)
             tcp_ack = int((tcp.flags & dpkt.tcp.TH_ACK) != 0)
             tcp_fin = int((tcp.flags & dpkt.tcp.TH_FIN) != 0)
             tcp_rst = int((tcp.flags & dpkt.tcp.TH_RST) != 0)
-        elif isinstance(ip.data, dpkt.udp.UDP):
+        elif isinstance(l4_payload, dpkt.udp.UDP):
             l4_udp = 1
-            udp = ip.data
+            udp = l4_payload
             src_port = int(udp.sport)
             dst_port = int(udp.dport)
-        elif isinstance(ip.data, (dpkt.icmp.ICMP, getattr(dpkt, "icmp6", object))):
+        elif isinstance(l4_payload, (dpkt.icmp.ICMP, getattr(dpkt, "icmp6", object))):
             l4_icmp = 1
         else:
             pass
@@ -258,6 +308,11 @@ def parse_pcap_to_features(
 
     # Direction inference
     dev_ip = device_ip or (guess_device and guess_device_ip(metas)) or None
+    if dev_ip:
+        print(f"Using device IP: {dev_ip} for {path.name}")
+    else:
+        print(f"Warning: Could not determine device IP for {path.name}. Direction will be -1.")
+
     for pf, meta in zip(feats, metas):
         pf.direction_out = _direction_flag(meta.get("src_ip", ""), dev_ip)
 
