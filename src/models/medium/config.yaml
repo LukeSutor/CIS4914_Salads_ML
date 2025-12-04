@@ -1,0 +1,35 @@
+seed: 42
+deterministic: true
+out_dir: runs/mil_tcn_v1
+run_name: mil_tcn_medium_v2
+
+data:
+  train_folders: ["C:\\Users\\Luke\\Desktop\\UF\\senior-project\\ml\\data\\train"]
+  val_folders: ["C:\\Users\\Luke\\Desktop\\UF\\senior-project\\ml\\data\\val"]
+  cache_dir: "C:\\Users\\Luke\\Desktop\\UF\\senior-project\\ml\\data\\.cache"
+  device_ip: null
+  sample_by: "packets"  # or "time"
+  min_len: 20
+  max_len: 300
+  time_range_s: [0.5, 5.0]
+  samples_per_packet: 0.10
+  val_samples_per_packet: 0.05
+
+model:
+  hid_channels: [64, 128, 128, 256, 256, 256]
+  kernel_size: 5
+  dropout: 0.3
+  mil_hidden: 128
+  use_noisy_or: true
+
+train:
+  epochs: 100
+  batch_size: 128
+  num_workers: 0
+  lr: 5.0e-4
+  weight_decay: 1.0e-3
+  lambda_instance: 0.25
+  max_grad_norm: 1.0
+  max_pos_weight_bag: 10.0
+  max_pos_weight_inst: 100.0
+  log_interval: 50

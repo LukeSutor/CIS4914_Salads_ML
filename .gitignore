@@ -14,3 +14,4 @@ staggered_u.pcapng
 
 # Apple CoreML Models
 *.mlpackage
+*.mlmodel
