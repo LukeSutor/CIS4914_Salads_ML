@@ -1,6 +1,6 @@
 # Senior Project Fall 2025
 
-This repo contains the machine learning development for the CIS4914 SALADS Senior Project.
+This repo contains the machine learning development for the CIS4914 SALADS Senior Project. The repository for the app can be found [here](https://github.com/ETYoumans/CIS4914_Salads_App).
 
 ## Usage
 
